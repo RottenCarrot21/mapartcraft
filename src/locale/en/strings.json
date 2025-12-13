@@ -132,6 +132,8 @@
       "TITLE": "Dithering",
       "TITLE-TT": "Adds seemingly random pixels for the illusion of more colors",
       "NONE": "None",
+      "STRUCTURE-AWARE": "Structure-Aware Error Diffusion",
+      "STRUCTURE-AWARE-TT": "Adapts error diffusion to image structure for better detail preservation",
       "PROPAGATION-RED": "Red propagation",
       "PROPAGATION-GREEN": "Green propagation",
       "PROPAGATION-BLUE": "Blue propagation"
