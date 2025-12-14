@@ -534,6 +534,7 @@ function getMapartImageDataAndMaterials() {
       DitherMethods.Burkes.uniqueId,
       DitherMethods.Sierra.uniqueId,
       DitherMethods.SierraTworow.uniqueId,
+      DitherMethods.StructureAwareErrorDiffusion.uniqueId,
     ].includes(chosenDitherMethod.uniqueId)
   ) {
     divisor = chosenDitherMethod.ditherDivisor;
@@ -625,6 +626,7 @@ function getMapartImageDataAndMaterials() {
         case DitherMethods.Burkes.uniqueId:
         case DitherMethods.Sierra.uniqueId:
         case DitherMethods.SierraTworow.uniqueId:
+        case DitherMethods.StructureAwareErrorDiffusion.uniqueId:
         {
           closestColourSetIdAndTone = findClosestColourSetIdAndToneAndRGBTo(oldPixel);
           const closestColour = colourSetIdAndToneToRGB(closestColourSetIdAndTone.colourSetId, closestColourSetIdAndTone.tone);

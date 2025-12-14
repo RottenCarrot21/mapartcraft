@@ -257,5 +257,17 @@
       [175, 108, 42, 144, 34, 75, 2, 102, 196, 16, 76, 141, 110, 91],
       [33, 63, 158, 99, 168, 120, 180, 60, 37, 131, 176, 56, 1, 151]
     ]
+  },
+  "StructureAwareErrorDiffusion": {
+    "uniqueId": 25,
+    "name": "Structure-Aware Error Diffusion",
+    "localeKey": "MAP-SETTINGS/DITHERING/STRUCTURE-AWARE",
+    "ditherMatrix": [
+      [0, 0, 0, 7, 0],
+      [0, 3, 5, 1, 0],
+      [0, 0, 0, 0, 0]
+    ],
+    "ditherDivisor": 16.0,
+    "structureAware": true
   }
 }
