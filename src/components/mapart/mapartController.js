@@ -23,6 +23,43 @@ import IMG_Upload from "../../images/upload.png";
 
 import "./mapartController.css";
 
+function buildDefaultDitheringParameters(ditherMethods) {
+  const defaults = {};
+  for (const ditherMethod of Object.values(ditherMethods)) {
+    const methodId = ditherMethod.uniqueId;
+    const schema = ditherMethod?.metadata?.parameterSchema;
+    const params = {};
+    if (Array.isArray(schema)) {
+      for (const entry of schema) {
+        if (entry && typeof entry.name === "string" && "default" in entry) {
+          params[entry.name] = entry.default;
+        }
+      }
+    }
+    defaults[methodId] = params;
+  }
+  return defaults;
+}
+
+function mergeDitheringParameters(defaults, saved) {
+  const merged = { ...defaults };
+  if (!saved || typeof saved !== "object") {
+    return merged;
+  }
+
+  for (const [methodId, savedParams] of Object.entries(saved)) {
+    if (!savedParams || typeof savedParams !== "object") {
+      continue;
+    }
+    merged[methodId] = {
+      ...(merged[methodId] || {}),
+      ...savedParams,
+    };
+  }
+
+  return merged;
+}
+
 class MapartController extends Component {
   state = {
     coloursJSON: null,
@@ -49,6 +86,7 @@ class MapartController extends Component {
     optionValue_dithering_propagation_red: 100,
     optionValue_dithering_propagation_green: 100,
     optionValue_dithering_propagation_blue: 100,
+    optionValue_ditheringParameters: buildDefaultDitheringParameters(DitherMethods),
     optionValue_preprocessingEnabled: false,
     preProcessingValue_brightness: 100,
     preProcessingValue_contrast: 100,
@@ -74,6 +112,18 @@ class MapartController extends Component {
     super(props);
     // update default presets to latest version; done via checking for localeString
     CookieManager.init();
+
+    const defaultDitheringParameters = buildDefaultDitheringParameters(DitherMethods);
+    let cookieDitheringParameters = {};
+    try {
+      cookieDitheringParameters = JSON.parse(CookieManager.touchCookie("mapartcraft_ditheringParameters", JSON.stringify({})));
+    } catch {
+      cookieDitheringParameters = {};
+    }
+    const mergedDitheringParameters = mergeDitheringParameters(defaultDitheringParameters, cookieDitheringParameters);
+    this.state.optionValue_ditheringParameters = mergedDitheringParameters;
+    CookieManager.setCookie("mapartcraft_ditheringParameters", JSON.stringify(mergedDitheringParameters));
+
     let cookiesPresets_loaded = JSON.parse(CookieManager.touchCookie("mapartcraft_presets", JSON.stringify(DefaultPresets)));
     let cookiesPresets_updated = [];
     for (const cookiesPreset_loaded of cookiesPresets_loaded) {
@@ -348,7 +398,46 @@ class MapartController extends Component {
 
   onOptionChange_dithering = (e) => {
     const ditheringValue = parseInt(e.target.value);
-    this.setState({ optionValue_dithering: ditheringValue });
+
+    this.setState(
+      (currentState) => {
+        const defaultDitheringParameters = buildDefaultDitheringParameters(DitherMethods);
+        const existingAllMethodParams = currentState.optionValue_ditheringParameters || {};
+        const defaultParamsForMethod = defaultDitheringParameters[ditheringValue] || {};
+        const existingParamsForMethod = existingAllMethodParams[ditheringValue] || {};
+
+        const optionValue_ditheringParameters = {
+          ...existingAllMethodParams,
+          [ditheringValue]: {
+            ...defaultParamsForMethod,
+            ...existingParamsForMethod,
+          },
+        };
+
+        return { optionValue_dithering: ditheringValue, optionValue_ditheringParameters };
+      },
+      () => {
+        CookieManager.setCookie("mapartcraft_ditheringParameters", JSON.stringify(this.state.optionValue_ditheringParameters));
+      }
+    );
+  };
+
+  onOptionChange_ditheringParameter = (ditherMethodId, paramName, value) => {
+    this.setState(
+      (currentState) => {
+        const optionValue_ditheringParameters = {
+          ...(currentState.optionValue_ditheringParameters || {}),
+          [ditherMethodId]: {
+            ...((currentState.optionValue_ditheringParameters || {})[ditherMethodId] || {}),
+            [paramName]: value,
+          },
+        };
+        return { optionValue_ditheringParameters };
+      },
+      () => {
+        CookieManager.setCookie("mapartcraft_ditheringParameters", JSON.stringify(this.state.optionValue_ditheringParameters));
+      }
+    );
   };
 
   onOptionChange_dithering_propagation_red = (value) => {
@@ -796,6 +885,7 @@ class MapartController extends Component {
       optionValue_dithering_propagation_red,
       optionValue_dithering_propagation_green,
       optionValue_dithering_propagation_blue,
+      optionValue_ditheringParameters,
       optionValue_preprocessingEnabled,
       preProcessingValue_brightness,
       preProcessingValue_contrast,
@@ -859,6 +949,7 @@ class MapartController extends Component {
             optionValue_dithering_propagation_red={optionValue_dithering_propagation_red}
             optionValue_dithering_propagation_green={optionValue_dithering_propagation_green}
             optionValue_dithering_propagation_blue={optionValue_dithering_propagation_blue}
+            optionValue_ditheringParameters={optionValue_ditheringParameters}
             optionValue_preprocessingEnabled={optionValue_preprocessingEnabled}
             preProcessingValue_brightness={preProcessingValue_brightness}
             preProcessingValue_contrast={preProcessingValue_contrast}
@@ -910,6 +1001,8 @@ class MapartController extends Component {
               onOptionChange_BetterColour={this.onOptionChange_BetterColour}
               optionValue_dithering={optionValue_dithering}
               onOptionChange_dithering={this.onOptionChange_dithering}
+              optionValue_ditheringParameters={optionValue_ditheringParameters}
+              onOptionChange_ditheringParameter={this.onOptionChange_ditheringParameter}
               optionValue_dithering_propagation_red={optionValue_dithering_propagation_red}
               onOptionChange_dithering_propagation_red={this.onOptionChange_dithering_propagation_red}
               optionValue_dithering_propagation_green={optionValue_dithering_propagation_green}

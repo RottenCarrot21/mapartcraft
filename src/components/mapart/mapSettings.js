@@ -57,6 +57,8 @@ class MapSettings extends Component {
       onOptionChange_BetterColour,
       optionValue_dithering,
       onOptionChange_dithering,
+      optionValue_ditheringParameters,
+      onOptionChange_ditheringParameter,
       optionValue_dithering_propagation_red,
       onOptionChange_dithering_propagation_red,
       optionValue_dithering_propagation_green,
@@ -465,6 +467,123 @@ class MapSettings extends Component {
         <br />
       </React.Fragment>
     );
+    const selectedDitherMethod = Object.values(DitherMethods).find((method) => method.uniqueId === optionValue_dithering);
+    const selectedDitherMetadata = selectedDitherMethod?.metadata || {};
+    const computationIntensity = selectedDitherMetadata.computationIntensity || { label: "Unknown", tooltip: null };
+
+    const computationIntensityLabel = computationIntensity.tooltip ? (
+      <Tooltip tooltipText={computationIntensity.tooltip}>
+        <small className="ditheringIntensityLabel">{`(${computationIntensity.label})`}</small>
+      </Tooltip>
+    ) : (
+      <small className="ditheringIntensityLabel">{`(${computationIntensity.label})`}</small>
+    );
+
+    const selectedDitherParameterSchema = Array.isArray(selectedDitherMetadata.parameterSchema) ? selectedDitherMetadata.parameterSchema : [];
+    const selectedDitherParameters = (optionValue_ditheringParameters || {})[optionValue_dithering] || {};
+
+    const renderDitheringParameterRow = (param) => {
+      if (!param || typeof param.name !== "string") {
+        return null;
+      }
+
+      const label = param.label || param.name;
+
+      switch (param.type) {
+        case "int": {
+          const min = Number.isFinite(param.min) ? param.min : 0;
+          const max = Number.isFinite(param.max) ? param.max : 100;
+          const step = Number.isFinite(param.step) ? param.step : 1;
+          const defaultValue = Number.isFinite(param.default) ? param.default : min;
+
+          const value = Number.isFinite(selectedDitherParameters[param.name]) ? selectedDitherParameters[param.name] : defaultValue;
+
+          const setValue = (newValue) => {
+            onOptionChange_ditheringParameter(optionValue_dithering, param.name, newValue);
+          };
+
+          return (
+            <tr key={param.name}>
+              <th>
+                <b>
+                  {label}
+                  {":"}
+                </b>{" "}
+              </th>
+              <td>
+                <input
+                  type="range"
+                  min={min}
+                  max={max}
+                  step={step}
+                  value={value}
+                  onChange={(e) => setValue(parseInt(e.target.value))}
+                />
+              </td>
+              <td>
+                <BufferedNumberInput
+                  min={min}
+                  max={max}
+                  step={step}
+                  value={value}
+                  validators={[(t) => !isNaN(t), (t) => t >= min, (t) => t <= max]}
+                  onValidInput={setValue}
+                  style={{ width: "4em" }}
+                />
+              </td>
+            </tr>
+          );
+        }
+        case "bool": {
+          const value = Boolean(selectedDitherParameters[param.name]);
+          return (
+            <tr key={param.name}>
+              <th>
+                <b>
+                  {label}
+                  {":"}
+                </b>{" "}
+              </th>
+              <td>
+                <input type="checkbox" checked={value} onChange={(e) => onOptionChange_ditheringParameter(optionValue_dithering, param.name, e.target.checked)} />
+              </td>
+              <td />
+            </tr>
+          );
+        }
+        case "select": {
+          const options = Array.isArray(param.options) ? param.options : [];
+          if (!options.length) {
+            return null;
+          }
+          const value = selectedDitherParameters[param.name] ?? options[0].value;
+
+          return (
+            <tr key={param.name}>
+              <th>
+                <b>
+                  {label}
+                  {":"}
+                </b>{" "}
+              </th>
+              <td>
+                <select value={value} onChange={(e) => onOptionChange_ditheringParameter(optionValue_dithering, param.name, e.target.value)}>
+                  {options.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label || option.value}
+                    </option>
+                  ))}
+                </select>
+              </td>
+              <td />
+            </tr>
+          );
+        }
+        default:
+          return null;
+      }
+    };
+
     const setting_dithering = (
       <React.Fragment>
         <Tooltip tooltipText={getLocaleString("MAP-SETTINGS/DITHERING/TITLE-TT")}>
@@ -481,10 +600,19 @@ class MapSettings extends Component {
                 : DitherMethods[ditherMethodKey]["name"]}
             </option>
           ))}
-        </select>
+        </select>{" "}
+        {computationIntensityLabel}
         <br />
       </React.Fragment>
     );
+
+    const setting_ditheringParameters = selectedDitherParameterSchema.length ? (
+      <div className="settingsGroup">
+        <table>
+          <tbody>{selectedDitherParameterSchema.map(renderDitheringParameterRow)}</tbody>
+        </table>
+      </div>
+    ) : null;
     const setting_dithering_propagation_red = (
       <tr>
         <th>
@@ -794,6 +922,7 @@ class MapSettings extends Component {
         {settings_mapModeConditional}
         {setting_betterColour}
         {setting_dithering}
+        {setting_ditheringParameters}
         {setting_dithering_propagation}
         {settingGroup_preprocessing}
         {settingGroup_extras}
