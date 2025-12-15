@@ -535,7 +535,9 @@ function analyzeNeighborhood(x, y, parameters) {
   }
 
   const windowSize = parameters.windowSize || 5;
+  const edgeSensitivity = parameters.edgeSensitivity || 0.3;
   const transparencyWeight = parameters.transparencyWeight || 0.3;
+  const continuityBoost = parameters.continuityBoost || 0.3;
 
   const halfWindow = Math.floor(windowSize / 2);
   const neighbors = [];
@@ -612,7 +614,7 @@ function analyzeNeighborhood(x, y, parameters) {
     }
     
     continuity[dir.name] = {
-      score: continuityScore / halfWindow,
+      score: (continuityScore / halfWindow) * continuityBoost,
       transparentBoundary: false
     };
   }
@@ -637,7 +639,8 @@ function analyzeNeighborhood(x, y, parameters) {
           transparencyBoundary = true;
         }
       }
-      edgeStrength = edgeStrength / neighbors.length;
+      // Apply edge sensitivity scaling
+      edgeStrength = (edgeStrength / neighbors.length) * edgeSensitivity;
     }
   }
 
@@ -708,9 +711,11 @@ function calculateAdaptiveWeights(analysis, baseWeights, parameters) {
         }
 
         // Dampen weights across strong edges
-        if (analysis.edgeStrength > 0.3) {
-          const edgeDamping = Math.max(edgeDampingMax, edgeDampingScale * (1 - analysis.edgeStrength));
-          weightMultiplier *= edgeDamping;
+        if (analysis.edgeStrength > 0.05) {
+          // Scale damping with edge strength, with minimum damping based on edgeDampingMax
+          const edgeIntensity = Math.min(1.0, analysis.edgeStrength);
+          const edgeDamping = edgeDampingMax - (edgeDampingScale * edgeIntensity);
+          weightMultiplier *= Math.max(edgeDamping, 0.1); // Ensure minimum effectiveness
         }
 
         // Reduce error propagation near transparency boundaries
