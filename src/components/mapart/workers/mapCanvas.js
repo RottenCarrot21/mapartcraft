@@ -494,6 +494,500 @@ function getDitheringParametersForMethod(methodId) {
   return optionValue_ditheringParameters[methodId] || optionValue_ditheringParameters[methodId?.toString?.()] || {};
 }
 
+// Memoization cache for deterministic results
+const structureAwareCache = new Map();
+
+function getDeterministicSeed(x, y, methodId) {
+  // Create a deterministic seed based on coordinates and method ID
+  const seed = (x * 73856093) ^ (y * 19349663) ^ (methodId * 83492791);
+  return Math.abs(seed);
+}
+
+function getCachedStructureAnalysis(x, y, methodId) {
+  const seed = getDeterministicSeed(x, y, methodId);
+  const cacheKey = `${seed}_${methodId}`;
+  
+  if (structureAwareCache.has(cacheKey)) {
+    return structureAwareCache.get(cacheKey);
+  }
+  
+  return null;
+}
+
+function cacheStructureAnalysis(x, y, methodId, analysis) {
+  const seed = getDeterministicSeed(x, y, methodId);
+  const cacheKey = `${seed}_${methodId}`;
+  
+  // Limit cache size to prevent memory issues
+  if (structureAwareCache.size > 10000) {
+    const firstKey = structureAwareCache.keys().next().value;
+    structureAwareCache.delete(firstKey);
+  }
+  
+  structureAwareCache.set(cacheKey, analysis);
+}
+
+// Structure-aware analysis functions
+function analyzeNeighborhood(x, y, parameters) {
+  const cached = getCachedStructureAnalysis(x, y, 25); // 25 is StructureAwareErrorDiffusion uniqueId
+  if (cached && cached.analyzeNeighborhood) {
+    return cached.analyzeNeighborhood;
+  }
+
+  const windowSize = parameters.windowSize || 5;
+  const transparencyWeight = parameters.transparencyWeight || 0.3;
+
+  const halfWindow = Math.floor(windowSize / 2);
+  const neighbors = [];
+  const structurePatterns = new Map();
+
+  // Analyze neighborhood (configurable window size)
+  for (let dy = -halfWindow; dy <= halfWindow; dy++) {
+    for (let dx = -halfWindow; dx <= halfWindow; dx++) {
+      const nx = x + dx;
+      const ny = y + dy;
+
+      // Skip the center pixel
+      if (dx === 0 && dy === 0) continue;
+
+      // Guard against out-of-bounds and undefined entries
+      if (ny >= 0 && ny < structureGrid.length && nx >= 0 && nx < structureGrid[ny].length) {
+        const neighbor = structureGrid[ny][nx];
+        if (neighbor && neighbor.colourSetId !== null) {
+          neighbors.push({
+            x: nx,
+            y: ny,
+            dx: dx,
+            dy: dy,
+            colourSetId: neighbor.colourSetId,
+            tone: neighbor.tone,
+            isTransparent: neighbor.isTransparent
+          });
+
+          // Track block patterns for dominant structure analysis
+          const patternKey = `${neighbor.colourSetId}_${neighbor.tone}_${neighbor.isTransparent}`;
+          if (!structurePatterns.has(patternKey)) {
+            structurePatterns.set(patternKey, []);
+          }
+          structurePatterns.get(patternKey).push({ dx, dy });
+        }
+      }
+    }
+  }
+
+  // Find dominant structure patterns
+  let dominantPattern = null;
+  let maxPatternCount = 0;
+  for (const [pattern, positions] of structurePatterns.entries()) {
+    if (positions.length > maxPatternCount) {
+      maxPatternCount = positions.length;
+      dominantPattern = pattern;
+    }
+  }
+
+  // Calculate structure continuity in different directions
+  const directions = [
+    { name: 'horizontal', dx: 1, dy: 0 },
+    { name: 'vertical', dx: 0, dy: 1 },
+    { name: 'diagonal1', dx: 1, dy: 1 },
+    { name: 'diagonal2', dx: 1, dy: -1 }
+  ];
+
+  const continuity = {};
+  for (const dir of directions) {
+    let continuityScore = 0;
+    
+    for (let step = 1; step <= halfWindow; step++) {
+      const checkX = x + dir.dx * step;
+      const checkY = y + dir.dy * step;
+      
+      if (checkY >= 0 && checkY < structureGrid.length && checkX >= 0 && checkX < structureGrid[checkY].length) {
+        const cell = structureGrid[checkY][checkX];
+        if (cell && cell.colourSetId !== null) {
+          if (dominantPattern && `${cell.colourSetId}_${cell.tone}_${cell.isTransparent}` === dominantPattern) {
+            continuityScore += 1;
+          }
+        }
+      }
+    }
+    
+    continuity[dir.name] = {
+      score: continuityScore / halfWindow,
+      transparentBoundary: false
+    };
+  }
+
+  // Detect edges using structure similarity
+  let edgeStrength = 0;
+  let transparencyBoundary = false;
+  if (neighbors.length > 0) {
+    const currentCell = structureGrid[y] && structureGrid[y][x];
+    if (currentCell && currentCell.colourSetId !== null) {
+      for (const neighbor of neighbors) {
+        // Calculate structure similarity
+        const blockDiff = neighbor.colourSetId !== currentCell.colourSetId ? 1 : 0;
+        const toneDiff = neighbor.tone !== currentCell.tone ? 0.5 : 0;
+        const transDiff = neighbor.isTransparent !== currentCell.isTransparent ? 1 : 0;
+        
+        const totalDiff = blockDiff + toneDiff + transDiff * transparencyWeight;
+        edgeStrength += totalDiff;
+        
+        // Track transparency boundaries
+        if (transDiff > 0) {
+          transparencyBoundary = true;
+        }
+      }
+      edgeStrength = edgeStrength / neighbors.length;
+    }
+  }
+
+  const analysis = {
+    neighbors: neighbors,
+    dominantPattern: dominantPattern,
+    continuity: continuity,
+    edgeStrength: edgeStrength,
+    transparencyBoundary: transparencyBoundary,
+    neighborCount: neighbors.length
+  };
+
+  // Cache the analysis
+  if (!cached) {
+    cacheStructureAnalysis(x, y, 25, { analyzeNeighborhood: analysis });
+  } else {
+    cached.analyzeNeighborhood = analysis;
+  }
+
+  return analysis;
+}
+
+function calculateAdaptiveWeights(analysis, baseWeights, parameters) {
+  const directionBoostScalePercent = parameters.directionBoostScalePercent || 30;
+  const directionBoostMaxPercent = parameters.directionBoostMaxPercent || 50;
+  const edgeDampingScalePercent = parameters.edgeDampingScalePercent || 40;
+  const edgeDampingMaxPercent = parameters.edgeDampingMaxPercent || 40;
+  const transparencyDampingPercent = parameters.transparencyDampingPercent || 30;
+  const minWeightPercent = parameters.minWeightPercent || 10;
+
+  // Convert percentages to multipliers
+  const directionBoostScale = 1 + (directionBoostScalePercent / 100);
+  const directionBoostMax = 1 + (directionBoostMaxPercent / 100);
+  const edgeDampingScale = 1 - (edgeDampingScalePercent / 100);
+  const edgeDampingMax = 1 - (edgeDampingMaxPercent / 100);
+  const transparencyDamping = 1 - (transparencyDampingPercent / 100);
+  const minWeight = minWeightPercent / 100;
+
+  // Calculate direction-based boosts
+  const horizontalScore = analysis.continuity.horizontal?.score || 0;
+  const verticalScore = analysis.continuity.vertical?.score || 0;
+  const diagonal1Score = analysis.continuity.diagonal1?.score || 0;
+  const diagonal2Score = analysis.continuity.diagonal2?.score || 0;
+
+  // Create adaptive weights based on Floyd-Steinberg pattern
+  const adaptiveWeights = [
+    [0, 0, 0, 7, 0],
+    [0, 3, 5, 1, 0],
+    [0, 0, 0, 0, 0]
+  ];
+
+  // Apply structure-aware modifications
+  for (let row = 0; row < 3; row++) {
+    for (let col = 0; col < 5; col++) {
+      if (adaptiveWeights[row][col] > 0) {
+        let weightMultiplier = 1.0;
+
+        // Boost weights along dominant structure directions
+        if (col > 2) { // Right side - horizontal boost
+          weightMultiplier *= Math.min(directionBoostMax, directionBoostScale * horizontalScore);
+        }
+        if (row === 1 && col === 2) { // Down - vertical boost
+          weightMultiplier *= Math.min(directionBoostMax, directionBoostScale * verticalScore);
+        }
+        if (row === 1 && col > 2) { // Down-right - diagonal boost
+          const avgDiagonal = (diagonal1Score + diagonal2Score) / 2;
+          weightMultiplier *= Math.min(directionBoostMax, directionBoostScale * avgDiagonal);
+        }
+
+        // Dampen weights across strong edges
+        if (analysis.edgeStrength > 0.3) {
+          const edgeDamping = Math.max(edgeDampingMax, edgeDampingScale * (1 - analysis.edgeStrength));
+          weightMultiplier *= edgeDamping;
+        }
+
+        // Reduce error propagation near transparency boundaries
+        if (analysis.transparencyBoundary) {
+          weightMultiplier *= transparencyDamping;
+        }
+
+        // Ensure minimum weight to prevent complete stoppage
+        weightMultiplier = Math.max(minWeight, weightMultiplier);
+
+        adaptiveWeights[row][col] *= weightMultiplier;
+      }
+    }
+  }
+  
+  return adaptiveWeights;
+}
+
+function structureAwareDiffuse(pixelIndex, x, y, ditherMatrix, divisor, quantError, parameters) {
+  // Check cache first
+  const cached = getCachedStructureAnalysis(x, y, 25);
+  
+  let analysis;
+  if (cached && cached.analyzeNeighborhood) {
+    analysis = cached.analyzeNeighborhood;
+  } else {
+    // Perform neighborhood analysis
+    analysis = analyzeNeighborhood(x, y, parameters);
+  }
+
+  // Calculate adaptive weights
+  const adaptiveWeights = calculateAdaptiveWeights(analysis, ditherMatrix, parameters);
+
+  return {
+    weights: adaptiveWeights,
+    analysis: analysis
+  };
+}
+
+function applyAdaptiveDiffusion(pixelIndex, x, y, adaptiveData, quantError, multimapWidth) {
+  const { weights } = adaptiveData;
+  
+  try {
+    // Apply adaptive weights with proper bounds checking
+    // Right (1 pixel)
+    if (x + 1 < structureGrid[0].length) {
+      const weight = weights[0][3] / 16.0; // 1 right
+      const targetIndex = pixelIndex + 4;
+      if (targetIndex < canvasImageData.data.length) {
+        canvasImageData.data[targetIndex] += quantError[0] * weight;
+        canvasImageData.data[targetIndex + 1] += quantError[1] * weight;
+        canvasImageData.data[targetIndex + 2] += quantError[2] * weight;
+      }
+      
+      // 2 right
+      if (x + 2 < structureGrid[0].length) {
+        const weight2 = weights[0][4] / 16.0;
+        const targetIndex2 = pixelIndex + 8;
+        if (targetIndex2 < canvasImageData.data.length) {
+          canvasImageData.data[targetIndex2] += quantError[0] * weight2;
+          canvasImageData.data[targetIndex2 + 1] += quantError[1] * weight2;
+          canvasImageData.data[targetIndex2 + 2] += quantError[2] * weight2;
+        }
+      }
+    }
+
+    // First row below
+    if (y + 1 < structureGrid.length) {
+      // 1 down, 1 left
+      if (x > 0) {
+        const weight = weights[1][1] / 16.0;
+        const targetIndex = pixelIndex + multimapWidth * 4 - 4;
+        if (targetIndex >= 0 && targetIndex < canvasImageData.data.length) {
+          canvasImageData.data[targetIndex] += quantError[0] * weight;
+          canvasImageData.data[targetIndex + 1] += quantError[1] * weight;
+          canvasImageData.data[targetIndex + 2] += quantError[2] * weight;
+        }
+      }
+      
+      // 1 down, 2 left
+      if (x > 1) {
+        const weight = weights[1][0] / 16.0;
+        const targetIndex = pixelIndex + multimapWidth * 4 - 8;
+        if (targetIndex >= 0 && targetIndex < canvasImageData.data.length) {
+          canvasImageData.data[targetIndex] += quantError[0] * weight;
+          canvasImageData.data[targetIndex + 1] += quantError[1] * weight;
+          canvasImageData.data[targetIndex + 2] += quantError[2] * weight;
+        }
+      }
+
+      // 1 down
+      const weight = weights[1][2] / 16.0;
+      const targetIndex = pixelIndex + multimapWidth * 4;
+      if (targetIndex < canvasImageData.data.length) {
+        canvasImageData.data[targetIndex] += quantError[0] * weight;
+        canvasImageData.data[targetIndex + 1] += quantError[1] * weight;
+        canvasImageData.data[targetIndex + 2] += quantError[2] * weight;
+      }
+
+      // 1 down, 1 right
+      if (x + 1 < structureGrid[0].length) {
+        const weight = weights[1][3] / 16.0;
+        const targetIndex = pixelIndex + multimapWidth * 4 + 4;
+        if (targetIndex < canvasImageData.data.length) {
+          canvasImageData.data[targetIndex] += quantError[0] * weight;
+          canvasImageData.data[targetIndex + 1] += quantError[1] * weight;
+          canvasImageData.data[targetIndex + 2] += quantError[2] * weight;
+        }
+      }
+
+      // 1 down, 2 right
+      if (x + 2 < structureGrid[0].length) {
+        const weight = weights[1][4] / 16.0;
+        const targetIndex = pixelIndex + multimapWidth * 4 + 8;
+        if (targetIndex < canvasImageData.data.length) {
+          canvasImageData.data[targetIndex] += quantError[0] * weight;
+          canvasImageData.data[targetIndex + 1] += quantError[1] * weight;
+          canvasImageData.data[targetIndex + 2] += quantError[2] * weight;
+        }
+      }
+    }
+
+    // Second row below
+    if (y + 2 < structureGrid.length) {
+      // 2 down, 1 left
+      if (x > 0) {
+        const weight = weights[2][1] / 16.0;
+        const targetIndex = pixelIndex + multimapWidth * 8 - 4;
+        if (targetIndex >= 0 && targetIndex < canvasImageData.data.length) {
+          canvasImageData.data[targetIndex] += quantError[0] * weight;
+          canvasImageData.data[targetIndex + 1] += quantError[1] * weight;
+          canvasImageData.data[targetIndex + 2] += quantError[2] * weight;
+        }
+      }
+
+      // 2 down, 2 left
+      if (x > 1) {
+        const weight = weights[2][0] / 16.0;
+        const targetIndex = pixelIndex + multimapWidth * 8 - 8;
+        if (targetIndex >= 0 && targetIndex < canvasImageData.data.length) {
+          canvasImageData.data[targetIndex] += quantError[0] * weight;
+          canvasImageData.data[targetIndex + 1] += quantError[1] * weight;
+          canvasImageData.data[targetIndex + 2] += quantError[2] * weight;
+        }
+      }
+
+      // 2 down
+      const weight = weights[2][2] / 16.0;
+      const targetIndex = pixelIndex + multimapWidth * 8;
+      if (targetIndex < canvasImageData.data.length) {
+        canvasImageData.data[targetIndex] += quantError[0] * weight;
+        canvasImageData.data[targetIndex + 1] += quantError[1] * weight;
+        canvasImageData.data[targetIndex + 2] += quantError[2] * weight;
+      }
+
+      // 2 down, 1 right
+      if (x + 1 < structureGrid[0].length) {
+        const weight = weights[2][3] / 16.0;
+        const targetIndex = pixelIndex + multimapWidth * 8 + 4;
+        if (targetIndex < canvasImageData.data.length) {
+          canvasImageData.data[targetIndex] += quantError[0] * weight;
+          canvasImageData.data[targetIndex + 1] += quantError[1] * weight;
+          canvasImageData.data[targetIndex + 2] += quantError[2] * weight;
+        }
+      }
+
+      // 2 down, 2 right
+      if (x + 2 < structureGrid[0].length) {
+        const weight = weights[2][4] / 16.0;
+        const targetIndex = pixelIndex + multimapWidth * 8 + 8;
+        if (targetIndex < canvasImageData.data.length) {
+          canvasImageData.data[targetIndex] += quantError[0] * weight;
+          canvasImageData.data[targetIndex + 1] += quantError[1] * weight;
+          canvasImageData.data[targetIndex + 2] += quantError[2] * weight;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('Adaptive diffusion error:', e);
+    // Fallback will be handled by caller
+  }
+}
+
+function applyLegacyDiffusion(pixelIndex, x, y, ditherMatrix, divisor, quantError, multimapWidth) {
+  // Standard Floyd-Steinberg fallback with complete error diffusion pattern
+  try {
+    // Right (1 pixel)
+    if (x + 1 < structureGrid[0].length) {
+      const weight = ditherMatrix[0][3] / divisor; // 1 right
+      canvasImageData.data[pixelIndex + 4] += quantError[0] * weight;
+      canvasImageData.data[pixelIndex + 5] += quantError[1] * weight;
+      canvasImageData.data[pixelIndex + 6] += quantError[2] * weight;
+      
+      if (x + 2 < structureGrid[0].length) {
+        const weight2 = ditherMatrix[0][4] / divisor; // 2 right
+        canvasImageData.data[pixelIndex + 8] += quantError[0] * weight2;
+        canvasImageData.data[pixelIndex + 9] += quantError[1] * weight2;
+        canvasImageData.data[pixelIndex + 10] += quantError[2] * weight2;
+      }
+    }
+
+    // First row below
+    if (y + 1 < structureGrid.length) {
+      if (x > 0) {
+        const weight = ditherMatrix[1][1] / divisor; // 1 down, 1 left
+        canvasImageData.data[pixelIndex + multimapWidth * 4 - 4] += quantError[0] * weight;
+        canvasImageData.data[pixelIndex + multimapWidth * 4 - 3] += quantError[1] * weight;
+        canvasImageData.data[pixelIndex + multimapWidth * 4 - 2] += quantError[2] * weight;
+        
+        if (x > 1) {
+          const weight2 = ditherMatrix[1][0] / divisor; // 1 down, 2 left
+          canvasImageData.data[pixelIndex + multimapWidth * 4 - 8] += quantError[0] * weight2;
+          canvasImageData.data[pixelIndex + multimapWidth * 4 - 7] += quantError[1] * weight2;
+          canvasImageData.data[pixelIndex + multimapWidth * 4 - 6] += quantError[2] * weight2;
+        }
+      }
+      
+      const weight = ditherMatrix[1][2] / divisor; // 1 down
+      canvasImageData.data[pixelIndex + multimapWidth * 4 + 0] += quantError[0] * weight;
+      canvasImageData.data[pixelIndex + multimapWidth * 4 + 1] += quantError[1] * weight;
+      canvasImageData.data[pixelIndex + multimapWidth * 4 + 2] += quantError[2] * weight;
+      
+      if (x + 1 < structureGrid[0].length) {
+        const weight = ditherMatrix[1][3] / divisor; // 1 down, 1 right
+        canvasImageData.data[pixelIndex + multimapWidth * 4 + 4] += quantError[0] * weight;
+        canvasImageData.data[pixelIndex + multimapWidth * 4 + 5] += quantError[1] * weight;
+        canvasImageData.data[pixelIndex + multimapWidth * 4 + 6] += quantError[2] * weight;
+        
+        if (x + 2 < structureGrid[0].length) {
+          const weight2 = ditherMatrix[1][4] / divisor; // 1 down, 2 right
+          canvasImageData.data[pixelIndex + multimapWidth * 4 + 8] += quantError[0] * weight2;
+          canvasImageData.data[pixelIndex + multimapWidth * 4 + 9] += quantError[1] * weight2;
+          canvasImageData.data[pixelIndex + multimapWidth * 4 + 10] += quantError[2] * weight2;
+        }
+      }
+    }
+
+    // Second row below
+    if (y + 2 < structureGrid.length) {
+      if (x > 0) {
+        const weight = ditherMatrix[2][1] / divisor; // 2 down, 1 left
+        canvasImageData.data[pixelIndex + multimapWidth * 8 - 4] += quantError[0] * weight;
+        canvasImageData.data[pixelIndex + multimapWidth * 8 - 3] += quantError[1] * weight;
+        canvasImageData.data[pixelIndex + multimapWidth * 8 - 2] += quantError[2] * weight;
+        
+        if (x > 1) {
+          const weight2 = ditherMatrix[2][0] / divisor; // 2 down, 2 left
+          canvasImageData.data[pixelIndex + multimapWidth * 8 - 8] += quantError[0] * weight2;
+          canvasImageData.data[pixelIndex + multimapWidth * 8 - 7] += quantError[1] * weight2;
+          canvasImageData.data[pixelIndex + multimapWidth * 8 - 6] += quantError[2] * weight2;
+        }
+      }
+      
+      const weight = ditherMatrix[2][2] / divisor; // 2 down
+      canvasImageData.data[pixelIndex + multimapWidth * 8 + 0] += quantError[0] * weight;
+      canvasImageData.data[pixelIndex + multimapWidth * 8 + 1] += quantError[1] * weight;
+      canvasImageData.data[pixelIndex + multimapWidth * 8 + 2] += quantError[2] * weight;
+      
+      if (x + 1 < structureGrid[0].length) {
+        const weight = ditherMatrix[2][3] / divisor; // 2 down, 1 right
+        canvasImageData.data[pixelIndex + multimapWidth * 8 + 4] += quantError[0] * weight;
+        canvasImageData.data[pixelIndex + multimapWidth * 8 + 5] += quantError[1] * weight;
+        canvasImageData.data[pixelIndex + multimapWidth * 8 + 6] += quantError[2] * weight;
+        
+        if (x + 2 < structureGrid[0].length) {
+          const weight2 = ditherMatrix[2][4] / divisor; // 2 down, 2 right
+          canvasImageData.data[pixelIndex + multimapWidth * 8 + 8] += quantError[0] * weight2;
+          canvasImageData.data[pixelIndex + multimapWidth * 8 + 9] += quantError[1] * weight2;
+          canvasImageData.data[pixelIndex + multimapWidth * 8 + 10] += quantError[2] * weight2;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('Legacy diffusion fallback error:', e);
+  }
+}
+
 function clampNumber(value, min, max, fallback = min) {
   if (!Number.isFinite(value)) {
     return fallback;
@@ -502,462 +996,6 @@ function clampNumber(value, min, max, fallback = min) {
 }
 
 // Structure-aware diffusion function that analyzes neighborhoods for patterns and edges
-function structureAwareDiffuse(pixelIndex, x, y, baseKernel, divisor, quantError, structureParams) {
-  const baseWeights = baseKernel;
-  const totalWidth = optionValue_mapSize_x * 128;
-  const totalHeight = optionValue_mapSize_y * 128;
-  
-  // Define neighborhood size (5x5)
-  const neighborSize = 2;
-  
-  // Check if we have sufficient neighbor data (avoid edge cases)
-  const hasInsufficientData = (
-    x < neighborSize || 
-    x >= totalWidth - neighborSize || 
-    y < neighborSize || 
-    y >= totalHeight - neighborSize
-  );
-  
-  if (hasInsufficientData) {
-    // Fall back to legacy Floyd-Steinberg kernel
-    return legacyDiffusion(baseKernel, divisor, quantError, x, y);
-  }
-  
-  // Analyze 5×5 neighborhood for patterns, edges, and transparency
-  const neighborhood = analyzeNeighborhood(x, y);
-  
-  // Calculate adaptive weights based on structure analysis
-  const adaptiveWeights = calculateAdaptiveWeights(baseWeights, divisor, neighborhood, quantError, structureParams);
-  
-  return adaptiveWeights;
-}
-
-// Analyze neighborhood to detect dominant patterns, edges, and transparency boundaries
-function analyzeNeighborhood(centerX, centerY) {
-  const neighborSize = 2;
-  const analysis = {
-    blockPattern: new Map(), // Track dominant block types
-    edgeMap: [], // Edge strength map
-    transparencyBoundaries: false,
-    totalPixels: 0,
-    edgeStrength: 0,
-    dominantDirections: new Map() // Track preferred diffusion directions
-  };
-  
-  // Initialize edge map
-  for (let dy = -neighborSize; dy <= neighborSize; dy++) {
-    analysis.edgeMap[dy + neighborSize] = [];
-    for (let dx = -neighborSize; dx <= neighborSize; dx++) {
-      analysis.edgeMap[dy + neighborSize][dx + neighborSize] = 0;
-    }
-  }
-  
-  // Analyze neighborhood pixels
-  for (let dy = -neighborSize; dy <= neighborSize; dy++) {
-    for (let dx = -neighborSize; dx <= neighborSize; dx++) {
-      const nx = centerX + dx;
-      const ny = centerY + dy;
-      
-      if (nx < 0 || nx >= optionValue_mapSize_x * 128 || ny < 0 || ny >= optionValue_mapSize_y * 128) {
-        continue;
-      }
-      
-      const neighborStruct = structureGrid[ny][nx];
-      
-      // Skip unprocessed pixels
-      if (neighborStruct.colourSetId === null) {
-        continue;
-      }
-      
-      analysis.totalPixels++;
-      
-      // Track block patterns
-      const blockKey = `${neighborStruct.colourSetId}_${neighborStruct.tone}`;
-      analysis.blockPattern.set(blockKey, (analysis.blockPattern.get(blockKey) || 0) + 1);
-      
-      // Detect transparency boundaries
-      if (neighborStruct.isTransparent) {
-        analysis.transparencyBoundaries = true;
-      }
-      
-      // Calculate local edge strength using structure similarity
-      const edgeStrength = calculateEdgeStrength(nx, ny, neighborStruct);
-      analysis.edgeMap[dy + neighborSize][dx + neighborSize] = edgeStrength;
-      analysis.edgeStrength += edgeStrength;
-      
-      // Track preferred diffusion directions based on structure continuity
-      if (Math.abs(dx) + Math.abs(dy) > 0) {
-        const directionKey = getDirectionKey(dx, dy);
-        const continuity = getStructureContinuity(centerX, centerY, nx, ny);
-        analysis.dominantDirections.set(directionKey, 
-          (analysis.dominantDirections.get(directionKey) || 0) + continuity
-        );
-      }
-    }
-  }
-  
-  return analysis;
-}
-
-// Calculate edge strength based on structure similarity
-function calculateEdgeStrength(x, y, currentStruct) {
-  const neighborOffsets = [
-    [-1, 0], [1, 0], [0, -1], [0, 1], // Cardinal directions
-    [-1, -1], [-1, 1], [1, -1], [1, 1] // Diagonal directions
-  ];
-  
-  let edgeStrength = 0;
-  let comparisons = 0;
-  
-  for (const [dx, dy] of neighborOffsets) {
-    const nx = x + dx;
-    const ny = y + dy;
-    
-    if (nx < 0 || nx >= optionValue_mapSize_x * 128 || ny < 0 || ny >= optionValue_mapSize_y * 128) {
-      continue;
-    }
-    
-    const neighborStruct = structureGrid[ny][nx];
-    if (neighborStruct.colourSetId === null) {
-      continue;
-    }
-    
-    comparisons++;
-    
-    // Calculate structure discontinuity
-    const blockDiff = (currentStruct.colourSetId !== neighborStruct.colourSetId) ? 1 : 0;
-    const toneDiff = (currentStruct.tone !== neighborStruct.tone) ? 0.5 : 0;
-    const transDiff = (currentStruct.isTransparent !== neighborStruct.isTransparent) ? 1 : 0;
-    
-    edgeStrength += blockDiff + toneDiff + transDiff;
-  }
-  
-  return comparisons > 0 ? edgeStrength / comparisons : 0;
-}
-
-// Get directional key for diffusion tracking
-function getDirectionKey(dx, dy) {
-  if (Math.abs(dx) > Math.abs(dy)) {
-    return dx > 0 ? 'right' : 'left';
-  } else if (Math.abs(dy) > 0) {
-    return dy > 0 ? 'down' : 'up';
-  }
-  return 'center';
-}
-
-// Calculate structure continuity in a direction
-function getStructureContinuity(centerX, centerY, targetX, targetY) {
-  const dx = targetX - centerX;
-  const dy = targetY - centerY;
-  const distance = Math.sqrt(dx * dx + dy * dy);
-  
-  if (distance === 0) return 1;
-  
-  const centerStruct = structureGrid[centerY][centerX];
-  const targetStruct = structureGrid[targetY][targetX];
-  
-  if (centerStruct.colourSetId === null || targetStruct.colourSetId === null) {
-    return 0;
-  }
-  
-  // Higher continuity for same block type and tone
-  let continuity = 0;
-  if (centerStruct.colourSetId === targetStruct.colourSetId) continuity += 0.6;
-  if (centerStruct.tone === targetStruct.tone) continuity += 0.4;
-  if (centerStruct.isTransparent === targetStruct.isTransparent) continuity += 0.2;
-  
-  // Decrease with distance
-  return continuity / distance;
-}
-
-// Calculate adaptive weights based on structure analysis
-function calculateAdaptiveWeights(baseKernel, divisor, analysis, quantError, structureParams) {
-  const weights = [];
-  let totalWeight = 0;
-  
-  // Normalize base kernel
-  for (let row = 0; row < baseKernel.length; row++) {
-    weights[row] = [];
-    for (let col = 0; col < baseKernel[row].length; col++) {
-      if (row === 0 && col <= 2) {
-        weights[row][col] = 0; // Skip center and immediate left positions
-      } else {
-        const adaptiveWeight = adaptWeightForStructure(baseKernel[row][col], row, col, analysis, divisor, structureParams);
-        weights[row][col] = adaptiveWeight;
-        totalWeight += adaptiveWeight;
-      }
-    }
-  }
-  
-  // Normalize weights to maintain error conservation
-  if (totalWeight > 0) {
-    const normalizationFactor = (baseKernel.reduce((sum, row) => 
-      sum + row.reduce((rowSum, val) => rowSum + val, 0), 0) / divisor) / totalWeight;
-    
-    for (let row = 0; row < weights.length; row++) {
-      for (let col = 0; col < weights[row].length; col++) {
-        weights[row][col] *= normalizationFactor;
-      }
-    }
-  }
-  
-  return weights;
-}
-
-// Adapt individual weight based on structure analysis
-function adaptWeightForStructure(baseWeight, row, col, analysis, divisor, structureParams) {
-  if (baseWeight === 0) return 0;
-  
-  // Calculate position weights based on Floyd-Steinberg pattern
-  let positionWeight = 1.0;
-  
-  // Identify relative position from center (row 0 is current row)
-  const relativeRow = row;
-  const relativeCol = col - 2; // Center column is index 2
-  
-  const params = structureParams && typeof structureParams === "object" ? structureParams : {};
-
-  const directionBoostScale = clampNumber(Number(params.directionBoostScalePercent) / 100, 0, 5, 0.3);
-  const directionBoostMax = clampNumber(Number(params.directionBoostMaxPercent) / 100, 0, 5, 0.5);
-  const edgeDampingScale = clampNumber(Number(params.edgeDampingScalePercent) / 100, 0, 5, 0.4);
-  const edgeDampingMax = clampNumber(Number(params.edgeDampingMaxPercent) / 100, 0, 1, 0.4);
-  const transparencyDamping = clampNumber(Number(params.transparencyDampingPercent) / 100, 0, 1, 0.3);
-  const minWeightFactor = clampNumber(Number(params.minWeightPercent) / 100, 0, 1, 0.1);
-
-  // Enhance weights along dominant structure directions
-  const directionKey = getDirectionKey(relativeCol, relativeRow);
-  const directionStrength = analysis.dominantDirections.get(directionKey) || 0;
-
-  if (directionStrength > 0) {
-    positionWeight *= (1.0 + Math.min(directionStrength * directionBoostScale, directionBoostMax));
-  }
-
-  // Dampen weights across strong edges
-  if (analysis.edgeStrength > 0.3) {
-    positionWeight *= (1.0 - Math.min(analysis.edgeStrength * edgeDampingScale, edgeDampingMax));
-  }
-
-  // Special handling for transparency boundaries
-  if (analysis.transparencyBoundaries) {
-    positionWeight *= (1.0 - transparencyDamping);
-  }
-
-  // Ensure minimum weight to maintain some error diffusion
-  const minWeight = baseWeight / divisor * minWeightFactor;
-  const adaptedWeight = Math.max(baseWeight / divisor * positionWeight, minWeight);
-  
-  return adaptedWeight;
-}
-
-// Legacy Floyd-Steinberg diffusion for fallback
-function legacyDiffusion(baseKernel, divisor, quantError, x, y) {
-  const weights = [];
-  
-  for (let row = 0; row < baseKernel.length; row++) {
-    weights[row] = [];
-    for (let col = 0; col < baseKernel[row].length; col++) {
-      weights[row][col] = baseKernel[row][col] / divisor;
-    }
-  }
-  
-  return weights;
-}
-
-// Apply adaptive diffusion weights to neighboring pixels
-function applyAdaptiveDiffusion(pixelIndex, x, y, weights, quant_error, multimapWidth) {
-  const i = pixelIndex;
-  
-  try {
-    // Apply weights from adaptive kernel
-    if (x + 1 < multimapWidth) {
-      // 1 right
-      {
-        let weight0_3 = weights[0][3] || 0;
-        canvasImageData.data[i + 4] += quant_error[0] * weight0_3;
-        canvasImageData.data[i + 5] += quant_error[1] * weight0_3;
-        canvasImageData.data[i + 6] += quant_error[2] * weight0_3;
-        if (x + 2 < multimapWidth) {
-          // 2 right
-          let weight0_4 = weights[0][4] || 0;
-          canvasImageData.data[i + 8] += quant_error[0] * weight0_4;
-          canvasImageData.data[i + 9] += quant_error[1] * weight0_4;
-          canvasImageData.data[i + 10] += quant_error[2] * weight0_4;
-        }
-      }
-    }
-
-    // First row below
-    if (x > 0) {
-      // 1 down, 1 left
-      {
-        let weight1_1 = weights[1][1] || 0;
-        canvasImageData.data[i + multimapWidth * 4 - 4] += quant_error[0] * weight1_1;
-        canvasImageData.data[i + multimapWidth * 4 - 3] += quant_error[1] * weight1_1;
-        canvasImageData.data[i + multimapWidth * 4 - 2] += quant_error[2] * weight1_1;
-        if (x > 1) {
-          // 1 down, 2 left
-          let weight1_0 = weights[1][0] || 0;
-          canvasImageData.data[i + multimapWidth * 4 - 8] += quant_error[0] * weight1_0;
-          canvasImageData.data[i + multimapWidth * 4 - 7] += quant_error[1] * weight1_0;
-          canvasImageData.data[i + multimapWidth * 4 - 6] += quant_error[2] * weight1_0;
-        }
-      }
-    }
-    
-    // 1 down
-    {
-      let weight1_2 = weights[1][2] || 0;
-      canvasImageData.data[i + multimapWidth * 4 + 0] += quant_error[0] * weight1_2;
-      canvasImageData.data[i + multimapWidth * 4 + 1] += quant_error[1] * weight1_2;
-      canvasImageData.data[i + multimapWidth * 4 + 2] += quant_error[2] * weight1_2;
-      
-      if (x + 1 < multimapWidth) {
-        // 1 down, 1 right
-        let weight1_3 = weights[1][3] || 0;
-        canvasImageData.data[i + multimapWidth * 4 + 4] += quant_error[0] * weight1_3;
-        canvasImageData.data[i + multimapWidth * 4 + 5] += quant_error[1] * weight1_3;
-        canvasImageData.data[i + multimapWidth * 4 + 6] += quant_error[2] * weight1_3;
-        if (x + 2 < multimapWidth) {
-          // 1 down, 2 right
-          let weight1_4 = weights[1][4] || 0;
-          canvasImageData.data[i + multimapWidth * 4 + 8] += quant_error[0] * weight1_4;
-          canvasImageData.data[i + multimapWidth * 4 + 9] += quant_error[1] * weight1_4;
-          canvasImageData.data[i + multimapWidth * 4 + 10] += quant_error[2] * weight1_4;
-        }
-      }
-    }
-
-    // Second row below
-    if (x > 0) {
-      // 2 down, 1 left
-      {
-        let weight2_1 = weights[2][1] || 0;
-        canvasImageData.data[i + multimapWidth * 8 - 4] += quant_error[0] * weight2_1;
-        canvasImageData.data[i + multimapWidth * 8 - 3] += quant_error[1] * weight2_1;
-        canvasImageData.data[i + multimapWidth * 8 - 2] += quant_error[2] * weight2_1;
-        if (x > 1) {
-          // 2 down, 2 left
-          let weight2_0 = weights[2][0] || 0;
-          canvasImageData.data[i + multimapWidth * 8 - 8] += quant_error[0] * weight2_0;
-          canvasImageData.data[i + multimapWidth * 8 - 7] += quant_error[1] * weight2_0;
-          canvasImageData.data[i + multimapWidth * 8 - 6] += quant_error[2] * weight2_0;
-        }
-      }
-    }
-    
-    // 2 down
-    {
-      let weight2_2 = weights[2][2] || 0;
-      canvasImageData.data[i + multimapWidth * 8 + 0] += quant_error[0] * weight2_2;
-      canvasImageData.data[i + multimapWidth * 8 + 1] += quant_error[1] * weight2_2;
-      canvasImageData.data[i + multimapWidth * 8 + 2] += quant_error[2] * weight2_2;
-      
-      if (x + 1 < multimapWidth) {
-        // 2 down, 1 right
-        let weight2_3 = weights[2][3] || 0;
-        canvasImageData.data[i + multimapWidth * 8 + 4] += quant_error[0] * weight2_3;
-        canvasImageData.data[i + multimapWidth * 8 + 5] += quant_error[1] * weight2_3;
-        canvasImageData.data[i + multimapWidth * 8 + 6] += quant_error[2] * weight2_3;
-        if (x + 2 < multimapWidth) {
-          // 2 down, 2 right
-          let weight2_4 = weights[2][4] || 0;
-          canvasImageData.data[i + multimapWidth * 8 + 8] += quant_error[0] * weight2_4;
-          canvasImageData.data[i + multimapWidth * 8 + 9] += quant_error[1] * weight2_4;
-          canvasImageData.data[i + multimapWidth * 8 + 10] += quant_error[2] * weight2_4;
-        }
-      }
-    }
-  } catch (e) {
-    console.error("Error applying adaptive diffusion:", e);
-    throw e;
-  }
-}
-
-// Apply legacy Floyd-Steinberg diffusion (used as fallback)
-function applyLegacyDiffusion(pixelIndex, x, y, baseKernel, divisor, quant_error, multimapWidth) {
-  const i = pixelIndex;
-  
-  try {
-    // ditherMatrix [0][0...2] should always be zero, and can thus be skipped
-    if (x + 1 < multimapWidth) {
-      // Make sure to not carry over error from one side to the other
-      let weightLegacy0_3 = baseKernel[0][3] / divisor; // 1 right
-      canvasImageData.data[i + 4] += quant_error[0] * weightLegacy0_3;
-      canvasImageData.data[i + 5] += quant_error[1] * weightLegacy0_3;
-      canvasImageData.data[i + 6] += quant_error[2] * weightLegacy0_3;
-      if (x + 2 < multimapWidth) {
-        let weightLegacy0_4 = baseKernel[0][4] / divisor; // 2 right
-        canvasImageData.data[i + 8] += quant_error[0] * weightLegacy0_4;
-        canvasImageData.data[i + 9] += quant_error[1] * weightLegacy0_4;
-        canvasImageData.data[i + 10] += quant_error[2] * weightLegacy0_4;
-      }
-    }
-
-    // First row below
-    if (x > 0) {
-      // Order reversed, to allow nesting of 'if' blocks
-      let weightLegacy1_1 = baseKernel[1][1] / divisor; // 1 down, 1 left
-      canvasImageData.data[i + multimapWidth * 4 - 4] += quant_error[0] * weightLegacy1_1;
-      canvasImageData.data[i + multimapWidth * 4 - 3] += quant_error[1] * weightLegacy1_1;
-      canvasImageData.data[i + multimapWidth * 4 - 2] += quant_error[2] * weightLegacy1_1;
-      if (x > 1) {
-        let weightLegacy1_0 = baseKernel[1][0] / divisor; // 1 down, 2 left
-        canvasImageData.data[i + multimapWidth * 4 - 8] += quant_error[0] * weightLegacy1_0;
-        canvasImageData.data[i + multimapWidth * 4 - 7] += quant_error[1] * weightLegacy1_0;
-        canvasImageData.data[i + multimapWidth * 4 - 6] += quant_error[2] * weightLegacy1_0;
-      }
-    }
-    let weightLegacy1_2 = baseKernel[1][2] / divisor; // 1 down
-    canvasImageData.data[i + multimapWidth * 4 + 0] += quant_error[0] * weightLegacy1_2;
-    canvasImageData.data[i + multimapWidth * 4 + 1] += quant_error[1] * weightLegacy1_2;
-    canvasImageData.data[i + multimapWidth * 4 + 2] += quant_error[2] * weightLegacy1_2;
-    if (x + 1 < multimapWidth) {
-      let weightLegacy1_3 = baseKernel[1][3] / divisor; // 1 down, 1 right
-      canvasImageData.data[i + multimapWidth * 4 + 4] += quant_error[0] * weightLegacy1_3;
-      canvasImageData.data[i + multimapWidth * 4 + 5] += quant_error[1] * weightLegacy1_3;
-      canvasImageData.data[i + multimapWidth * 4 + 6] += quant_error[2] * weightLegacy1_3;
-      if (x + 2 < multimapWidth) {
-        let weightLegacy1_4 = baseKernel[1][4] / divisor; // 1 down, 2 right
-        canvasImageData.data[i + multimapWidth * 4 + 8] += quant_error[0] * weightLegacy1_4;
-        canvasImageData.data[i + multimapWidth * 4 + 9] += quant_error[1] * weightLegacy1_4;
-        canvasImageData.data[i + multimapWidth * 4 + 10] += quant_error[2] * weightLegacy1_4;
-      }
-    }
-
-    // Second row below
-    if (x > 0) {
-      let weightLegacy2_1 = baseKernel[2][1] / divisor; // 2 down, 1 left
-      canvasImageData.data[i + multimapWidth * 8 - 4] += quant_error[0] * weightLegacy2_1;
-      canvasImageData.data[i + multimapWidth * 8 - 3] += quant_error[1] * weightLegacy2_1;
-      canvasImageData.data[i + multimapWidth * 8 - 2] += quant_error[2] * weightLegacy2_1;
-      if (x > 1) {
-        let weightLegacy2_0 = baseKernel[2][0] / divisor; // 2 down, 2 left
-        canvasImageData.data[i + multimapWidth * 8 - 8] += quant_error[0] * weightLegacy2_0;
-        canvasImageData.data[i + multimapWidth * 8 - 7] += quant_error[1] * weightLegacy2_0;
-        canvasImageData.data[i + multimapWidth * 8 - 6] += quant_error[2] * weightLegacy2_0;
-      }
-    }
-    let weightLegacy2_2 = baseKernel[2][2] / divisor; // 2 down
-    canvasImageData.data[i + multimapWidth * 8 + 0] += quant_error[0] * weightLegacy2_2;
-    canvasImageData.data[i + multimapWidth * 8 + 1] += quant_error[1] * weightLegacy2_2;
-    canvasImageData.data[i + multimapWidth * 8 + 2] += quant_error[2] * weightLegacy2_2;
-    if (x + 1 < multimapWidth) {
-      let weightLegacy2_3 = baseKernel[2][3] / divisor; // 2 down, 1 right
-      canvasImageData.data[i + multimapWidth * 8 + 4] += quant_error[0] * weightLegacy2_3;
-      canvasImageData.data[i + multimapWidth * 8 + 5] += quant_error[1] * weightLegacy2_3;
-      canvasImageData.data[i + multimapWidth * 8 + 6] += quant_error[2] * weightLegacy2_3;
-      if (x + 2 < multimapWidth) {
-        let weightLegacy2_4 = baseKernel[2][4] / divisor; // 2 down, 2 right
-        canvasImageData.data[i + multimapWidth * 8 + 8] += quant_error[0] * weightLegacy2_4;
-        canvasImageData.data[i + multimapWidth * 8 + 9] += quant_error[1] * weightLegacy2_4;
-        canvasImageData.data[i + multimapWidth * 8 + 10] += quant_error[2] * weightLegacy2_4;
-      }
-    }
-  } catch (e) {
-    console.error("Error applying legacy diffusion:", e);
-    throw e;
-  }
-}
 
 function getMapartImageDataAndMaterials() {
   for (let y = 0; y < optionValue_mapSize_y; y++) {
@@ -981,6 +1019,9 @@ function getMapartImageDataAndMaterials() {
   }
 
   const requiresStructureGrid = Boolean(chosenDitherMethod?.metadata?.flags?.requiresStructureGrid || chosenDitherMethod?.structureAware);
+  
+  // Clear and initialize structureGrid only when needed
+  structureGrid.length = 0; // Clear existing data
   if (requiresStructureGrid) {
     // Initialize structure grid to mirror pixel grid dimensions
     const totalWidth = optionValue_mapSize_x * 128;
