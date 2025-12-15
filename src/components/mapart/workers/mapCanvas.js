@@ -20,6 +20,7 @@ var optionValue_transparency;
 var optionValue_transparencyTolerance;
 var optionValue_betterColour;
 var optionValue_dithering;
+var optionValue_ditheringParameters;
 var optionValue_dithering_propagation_red;
 var optionValue_dithering_propagation_green;
 var optionValue_dithering_propagation_blue;
@@ -485,8 +486,23 @@ function colourSetIdAndToneToRGB(colourSetId, tone) {
   return coloursJSON[colourSetId]["tonesRGB"][tone];
 }
 
+function getDitheringParametersForMethod(methodId) {
+  if (!optionValue_ditheringParameters || typeof optionValue_ditheringParameters !== "object") {
+    return {};
+  }
+
+  return optionValue_ditheringParameters[methodId] || optionValue_ditheringParameters[methodId?.toString?.()] || {};
+}
+
+function clampNumber(value, min, max, fallback = min) {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(value, min), max);
+}
+
 // Structure-aware diffusion function that analyzes neighborhoods for patterns and edges
-function structureAwareDiffuse(pixelIndex, x, y, baseKernel, divisor, quantError) {
+function structureAwareDiffuse(pixelIndex, x, y, baseKernel, divisor, quantError, structureParams) {
   const baseWeights = baseKernel;
   const totalWidth = optionValue_mapSize_x * 128;
   const totalHeight = optionValue_mapSize_y * 128;
@@ -511,7 +527,7 @@ function structureAwareDiffuse(pixelIndex, x, y, baseKernel, divisor, quantError
   const neighborhood = analyzeNeighborhood(x, y);
   
   // Calculate adaptive weights based on structure analysis
-  const adaptiveWeights = calculateAdaptiveWeights(baseWeights, divisor, neighborhood, quantError);
+  const adaptiveWeights = calculateAdaptiveWeights(baseWeights, divisor, neighborhood, quantError, structureParams);
   
   return adaptiveWeights;
 }
@@ -655,7 +671,7 @@ function getStructureContinuity(centerX, centerY, targetX, targetY) {
 }
 
 // Calculate adaptive weights based on structure analysis
-function calculateAdaptiveWeights(baseKernel, divisor, analysis, quantError) {
+function calculateAdaptiveWeights(baseKernel, divisor, analysis, quantError, structureParams) {
   const weights = [];
   let totalWeight = 0;
   
@@ -666,8 +682,7 @@ function calculateAdaptiveWeights(baseKernel, divisor, analysis, quantError) {
       if (row === 0 && col <= 2) {
         weights[row][col] = 0; // Skip center and immediate left positions
       } else {
-        const baseWeight = baseKernel[row][col] / divisor;
-        const adaptiveWeight = adaptWeightForStructure(baseKernel[row][col], row, col, analysis, divisor);
+        const adaptiveWeight = adaptWeightForStructure(baseKernel[row][col], row, col, analysis, divisor, structureParams);
         weights[row][col] = adaptiveWeight;
         totalWeight += adaptiveWeight;
       }
@@ -690,7 +705,7 @@ function calculateAdaptiveWeights(baseKernel, divisor, analysis, quantError) {
 }
 
 // Adapt individual weight based on structure analysis
-function adaptWeightForStructure(baseWeight, row, col, analysis, divisor) {
+function adaptWeightForStructure(baseWeight, row, col, analysis, divisor, structureParams) {
   if (baseWeight === 0) return 0;
   
   // Calculate position weights based on Floyd-Steinberg pattern
@@ -700,26 +715,35 @@ function adaptWeightForStructure(baseWeight, row, col, analysis, divisor) {
   const relativeRow = row;
   const relativeCol = col - 2; // Center column is index 2
   
+  const params = structureParams && typeof structureParams === "object" ? structureParams : {};
+
+  const directionBoostScale = clampNumber(Number(params.directionBoostScalePercent) / 100, 0, 5, 0.3);
+  const directionBoostMax = clampNumber(Number(params.directionBoostMaxPercent) / 100, 0, 5, 0.5);
+  const edgeDampingScale = clampNumber(Number(params.edgeDampingScalePercent) / 100, 0, 5, 0.4);
+  const edgeDampingMax = clampNumber(Number(params.edgeDampingMaxPercent) / 100, 0, 1, 0.4);
+  const transparencyDamping = clampNumber(Number(params.transparencyDampingPercent) / 100, 0, 1, 0.3);
+  const minWeightFactor = clampNumber(Number(params.minWeightPercent) / 100, 0, 1, 0.1);
+
   // Enhance weights along dominant structure directions
   const directionKey = getDirectionKey(relativeCol, relativeRow);
   const directionStrength = analysis.dominantDirections.get(directionKey) || 0;
-  
+
   if (directionStrength > 0) {
-    positionWeight *= (1.0 + Math.min(directionStrength * 0.3, 0.5)); // Boost up to 50%
+    positionWeight *= (1.0 + Math.min(directionStrength * directionBoostScale, directionBoostMax));
   }
-  
+
   // Dampen weights across strong edges
   if (analysis.edgeStrength > 0.3) {
-    positionWeight *= (1.0 - Math.min(analysis.edgeStrength * 0.4, 0.4)); // Reduce up to 40%
+    positionWeight *= (1.0 - Math.min(analysis.edgeStrength * edgeDampingScale, edgeDampingMax));
   }
-  
+
   // Special handling for transparency boundaries
   if (analysis.transparencyBoundaries) {
-    positionWeight *= 0.7; // Reduce error propagation near transparency
+    positionWeight *= (1.0 - transparencyDamping);
   }
-  
+
   // Ensure minimum weight to maintain some error diffusion
-  const minWeight = baseWeight / divisor * 0.1;
+  const minWeight = baseWeight / divisor * minWeightFactor;
   const adaptedWeight = Math.max(baseWeight / divisor * positionWeight, minWeight);
   
   return adaptedWeight;
@@ -948,19 +972,26 @@ function getMapartImageDataAndMaterials() {
     maps.push(mapsRowToAdd);
   }
 
-  // Initialize structure grid to mirror pixel grid dimensions
-  const totalWidth = optionValue_mapSize_x * 128;
-  const totalHeight = optionValue_mapSize_y * 128;
-  for (let y = 0; y < totalHeight; y++) {
-    let row = [];
-    for (let x = 0; x < totalWidth; x++) {
-      row.push({ colourSetId: null, tone: null, isTransparent: false });
-    }
-    structureGrid.push(row);
-  }
+  const chosenDitherMethodKey = Object.keys(DitherMethods).find((ditherMethodKey) => DitherMethods[ditherMethodKey].uniqueId === optionValue_dithering);
+  const chosenDitherMethod = chosenDitherMethodKey ? DitherMethods[chosenDitherMethodKey] : DitherMethods.None;
+  const ditheringParametersForMethod = getDitheringParametersForMethod(chosenDitherMethod.uniqueId);
 
   if (colourSetsToUse.length === 0) {
     return;
+  }
+
+  const requiresStructureGrid = Boolean(chosenDitherMethod?.metadata?.flags?.requiresStructureGrid || chosenDitherMethod?.structureAware);
+  if (requiresStructureGrid) {
+    // Initialize structure grid to mirror pixel grid dimensions
+    const totalWidth = optionValue_mapSize_x * 128;
+    const totalHeight = optionValue_mapSize_y * 128;
+    for (let y = 0; y < totalHeight; y++) {
+      let row = [];
+      for (let x = 0; x < totalWidth; x++) {
+        row.push({ colourSetId: null, tone: null, isTransparent: false });
+      }
+      structureGrid.push(row);
+    }
   }
 
   if (optionValue_modeNBTOrMapdat === MapModes.SCHEMATIC_NBT.uniqueId) {
@@ -973,8 +1004,6 @@ function getMapartImageDataAndMaterials() {
 
   let ditherMatrix;
   let divisor;
-  const chosenDitherMethod =
-    DitherMethods[Object.keys(DitherMethods).find((ditherMethodKey) => DitherMethods[ditherMethodKey].uniqueId === optionValue_dithering)];
   if (chosenDitherMethod.uniqueId !== DitherMethods.None.uniqueId) {
     ditherMatrix = chosenDitherMethod.ditherMatrix;
   }
@@ -999,7 +1028,8 @@ function getMapartImageDataAndMaterials() {
       DitherMethods.StructureAwareErrorDiffusion.uniqueId,
     ].includes(chosenDitherMethod.uniqueId)
   ) {
-    divisor = chosenDitherMethod.ditherDivisor;
+    const divisorParam = Number(ditheringParametersForMethod.divisor);
+    divisor = Number.isFinite(divisorParam) && divisorParam > 0 ? divisorParam : chosenDitherMethod.ditherDivisor;
   }
   for (let i = 0; i < canvasImageData.data.length; i += 4) {
     const indexR = i;
@@ -1205,7 +1235,7 @@ function getMapartImageDataAndMaterials() {
           };
 
           // Get adaptive diffusion weights from structure-aware analysis
-          const adaptiveWeights = structureAwareDiffuse(i, multimap_x, multimap_y, ditherMatrix, divisor, quant_error);
+          const adaptiveWeights = structureAwareDiffuse(i, multimap_x, multimap_y, ditherMatrix, divisor, quant_error, ditheringParametersForMethod);
 
           try {
             // Apply adaptive diffusion weights
@@ -1412,6 +1442,10 @@ onmessage = (e) => {
   optionValue_transparencyTolerance = e.data.body.optionValue_transparencyTolerance;
   optionValue_betterColour = e.data.body.optionValue_betterColour;
   optionValue_dithering = e.data.body.optionValue_dithering;
+  optionValue_ditheringParameters =
+    e.data.body.optionValue_ditheringParameters && typeof e.data.body.optionValue_ditheringParameters === "object"
+      ? e.data.body.optionValue_ditheringParameters
+      : {};
   optionValue_dithering_propagation_red = e.data.body.optionValue_dithering_propagation_red;
   optionValue_dithering_propagation_green = e.data.body.optionValue_dithering_propagation_green;
   optionValue_dithering_propagation_blue = e.data.body.optionValue_dithering_propagation_blue;

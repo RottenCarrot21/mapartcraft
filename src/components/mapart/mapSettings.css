@@ -4,3 +4,8 @@
   padding: 0.2em;
   outline: 0.1em solid white;
 }
+
+.ditheringIntensityLabel {
+  margin-left: 0.5em;
+  opacity: 0.8;
+}

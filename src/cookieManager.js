@@ -1,7 +1,7 @@
 class CookieManager {
   static init() {
     // Handle cookie migration
-    const cookieNames = ["presets", "mcversion", "customBlocks"];
+    const cookieNames = ["presets", "mcversion", "customBlocks", "ditheringParameters"];
     cookieNames.forEach(name => {
       if (this.getCookie(`mapartcraft_${name}`) === null && this.getCookie(name) !== null) {
         this.setCookie(`mapartcraft_${name}`, this.getCookie(name));
